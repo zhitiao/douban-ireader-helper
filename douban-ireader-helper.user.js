@@ -1,11 +1,9 @@
 // ==UserScript==
 // @name         豆瓣读书 - 掌阅书城搜索助手
 // @namespace    douban-ireader-helper
-// @version      1.7.0
-// @description  在豆瓣读书页面显示掌阅书城的搜索结果，支持列表页和详情页，支持书名+作者双重匹配
+// @version      1.8.0
+// @description  在豆瓣读书详情页显示掌阅书城的搜索结果，支持书名+作者双重匹配
 // @author       Wang Dongguan
-// @match        https://book.douban.com/mine*
-// @match        https://book.douban.com/people/*/wish*
 // @match        https://book.douban.com/subject/*
 // @grant        GM_xmlhttpRequest
 // @connect      m.zhangyue.com
@@ -18,11 +16,10 @@
 
   // ========== 配置常量 ==========
   const CACHE_KEY_PREFIX = "ireader_cache_";
-  const CACHE_VERSION = "v7"; // 缓存版本（修复作者分隔符匹配bug）
+  const CACHE_VERSION = "v8"; // 缓存版本（移除列表页功能）
   const CACHE_VERSION_KEY = "ireader_cache_version";
   const CACHE_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7天过期
   const API_TIMEOUT = 10000; // 10秒超时
-  const BATCH_SIZE = 3; // 并发批次大小
   const DEBUG = false; // 调试模式（生产环境设为false）
 
   // ========== 工具函数 ==========
@@ -81,58 +78,6 @@
     document.head.appendChild(style);
   }
 
-  // 更新列表页UI（原地更新，不删除重建）
-  function updateListItemUI(bookElement, result, status) {
-    const linkSpan = bookElement.querySelector(".ireader-info");
-    if (!linkSpan) {
-      // 首次创建
-      insertListItemUI(bookElement, result, status);
-      return;
-    }
-
-    // 原地更新：只修改link的内容和属性
-    const link = linkSpan.querySelector(".ireader-link");
-    if (!link) return;
-
-    // 重置状态类
-    link.className = "ireader-link";
-
-    // 根据状态更新内容
-    if (status === "loading") {
-      link.textContent = "查询掌阅书城中...";
-      link.style.color = "#666";
-      link.style.cursor = "default";
-      link.removeAttribute("href");
-      link.removeAttribute("target");
-    } else if (status === "error") {
-      link.innerHTML = `请求失败 <span class="ireader-retry" style="text-decoration: underline; cursor: pointer; color: #37a;">重试</span>`;
-      link.style.color = "#cc0000";
-      link.style.cursor = "default";
-      link.removeAttribute("href");
-      link.removeAttribute("target");
-    } else if (result && result.found) {
-      link.className = "ireader-link success";
-      link.href = result.url;
-      link.target = "_blank";
-      link.innerHTML = '<span class="checkmark" style="color: #0b7c2a;">✓</span> 掌阅书城有书';
-      link.style.color = "#37a";
-      link.style.cursor = "pointer";
-    } else if (result && result.uncertain) {
-      link.className = "ireader-link success";
-      link.href = result.searchUrl;
-      link.target = "_blank";
-      link.innerHTML = '<span style="color: #f60;">?</span> 查看搜索结果';
-      link.style.color = "#37a";
-      link.style.cursor = "pointer";
-    } else {
-      link.innerHTML = '<span style="color: #999;">✗</span> 掌阅书城没有';
-      link.style.color = "#999";
-      link.style.cursor = "default";
-      link.removeAttribute("href");
-      link.removeAttribute("target");
-    }
-  }
-
   // 更新详情页UI（原地更新，不删除重建）
   function updateDetailPageUI(result, status) {
     // 查找现有卡片
@@ -183,43 +128,10 @@
   function getPageType() {
     const url = window.location.href;
     if (url.includes("/subject/")) return "detail"; // 详情页
-    if (url.includes("/wish") || url.includes("status=wish")) return "list"; // 列表页
     return null;
   }
 
   // ========== 2. 书名提取 ==========
-
-  // 列表页 - 提取所有书籍
-  function getBooksFromList() {
-    const books = [];
-    const bookItems = document.querySelectorAll("li.subject-item");
-
-    bookItems.forEach((item) => {
-      const titleElement = item.querySelector(".info h2 a");
-      if (titleElement) {
-        // 只取主标题（冒号前的部分），去除副标题
-        const fullTitle = titleElement.textContent.trim();
-        const mainTitle = fullTitle.split(/[：:]/)[0].trim(); // 支持中英文冒号
-
-        // 提取作者信息（从.pub中提取，格式：作者 / 出版社 / 年份 / 价格）
-        let author = "";
-        const pubElement = item.querySelector(".info .pub");
-        if (pubElement) {
-          const pubText = pubElement.textContent.trim();
-          // 提取第一个 / 前的内容作为作者
-          author = pubText.split("/")[0].trim();
-        }
-
-        books.push({
-          title: mainTitle,
-          author: author, // 新增作者字段
-          element: item, // 保存元素引用，用于后续插入UI
-        });
-      }
-    });
-
-    return books;
-  }
 
   // 详情页 - 提取当前书籍
   function getBookFromDetail() {
@@ -396,66 +308,6 @@
 
   // ========== 4. UI插入模块 ==========
 
-  // 列表页UI插入
-  function insertListItemUI(bookElement, result, status) {
-    // 查找 .cart-actions 区域（价格所在的容器）
-    const cartActions = bookElement.querySelector(".info .ft .cart-actions");
-    if (!cartActions) return;
-
-    // 删除「加入购书单」按钮
-    const cartInfo = cartActions.querySelector(".cart-info");
-    if (cartInfo) cartInfo.remove();
-
-    // 删除「去看电子版」按钮
-    const ftElement = bookElement.querySelector(".info .ft");
-    if (ftElement) {
-      const ebookLink = ftElement.querySelector(".ebook-link");
-      if (ebookLink) ebookLink.remove();
-    }
-
-    // 创建链接容器（模仿 .buy-info 的结构）
-    const linkSpan = document.createElement("span");
-    linkSpan.className = "ireader-info";
-    linkSpan.style.cssText = "margin-left: 15px;";
-
-    const link = document.createElement("a");
-    link.className = "ireader-link";
-    link.style.cssText = `
-      color: #37a;
-      font-size: 13px;
-      text-decoration: none;
-    `;
-
-    // 根据状态显示不同内容
-    if (status === "loading") {
-      link.textContent = "查询掌阅书城中...";
-      link.style.color = "#666";
-      link.style.cursor = "default";
-    } else if (status === "error") {
-      link.innerHTML = `请求失败 <span class="ireader-retry" style="text-decoration: underline; cursor: pointer; color: #37a;">重试</span>`;
-      link.style.color = "#cc0000";
-    } else if (result && result.found) {
-      link.className = "ireader-link success"; // 添加success类，用于CSS hover
-      link.href = result.url;
-      link.target = "_blank";
-      link.innerHTML = '<span class="checkmark" style="color: #0b7c2a;">✓</span> 掌阅书城有书';
-      // 移除JS事件监听器，改用CSS hover（性能优化）
-    } else if (result && result.uncertain) {
-      link.className = "ireader-link success";
-      link.href = result.searchUrl;
-      link.target = "_blank";
-      link.innerHTML = '<span style="color: #f60;">?</span> 查看搜索结果';
-    } else {
-      link.innerHTML = '<span style="color: #999;">✗</span> 掌阅书城没有';
-      link.style.color = "#999";
-      link.style.cursor = "default";
-    }
-
-    linkSpan.appendChild(link);
-    // 插入到 .cart-actions 内部（与价格在同一行）
-    cartActions.appendChild(linkSpan);
-  }
-
   // 详情页UI插入（模仿豆瓣「当前版本有售」卡片样式）
   function insertDetailPageUI(result, status) {
     // 查找右侧栏
@@ -614,76 +466,7 @@
     }
   }
 
-  // ========== 7. 并发控制 ==========
-
-  // 批量处理，控制并发数
-  async function batchProcess(items, batchSize, processor) {
-    for (let i = 0; i < items.length; i += batchSize) {
-      const batch = items.slice(i, i + batchSize);
-      await Promise.all(batch.map(processor));
-    }
-  }
-
-  // ========== 8. 业务逻辑 ==========
-
-  // 处理列表页（性能优化：只在无缓存时才显示loading）
-  async function handleListPage() {
-    const books = getBooksFromList();
-
-    if (books.length === 0) {
-      debugLog("未找到书籍条目");
-      return;
-    }
-
-    debugLog(`找到 ${books.length} 本书，开始查询掌阅书城...`);
-
-    // 性能优化：移除统一loading显示，改为按需显示
-
-    // 分批并发处理（每批3个，避免速率限制）
-    await batchProcess(books, BATCH_SIZE, async (book) => {
-      // 检查缓存
-      let result = getCachedResult(book.title);
-
-      if (!result) {
-        // 性能优化：只在无缓存时才显示loading
-        updateListItemUI(book.element, null, "loading");
-
-        try {
-          const html = await searchIReader(book.title);
-          result = parseSearchResult(html, book.title, book.author);
-          setCachedResult(book.title, result);
-        } catch (error) {
-          console.error(`搜索 "${book.title}" 失败:`, error);
-
-          // 显示错误状态
-          updateListItemUI(book.element, null, "error");
-
-          // 添加重试功能
-          attachRetryHandler(book.element, book.title, async (title) => {
-            updateListItemUI(book.element, null, "loading");
-
-            try {
-              const html = await searchIReader(title);
-              const result = parseSearchResult(html, title, book.author);
-              setCachedResult(title, result);
-              updateListItemUI(book.element, result, "success");
-            } catch (error) {
-              updateListItemUI(book.element, null, "error");
-            }
-          });
-
-          return; // 出错时直接返回
-        }
-      } else {
-        debugLog(`"${book.title}" 使用缓存结果`);
-      }
-
-      // 更新UI显示结果（有缓存时直接显示，无缓存时从loading更新为结果）
-      updateListItemUI(book.element, result, "success");
-    });
-
-    debugLog("所有书籍查询完成");
-  }
+  // ========== 7. 业务逻辑 ==========
 
   // 处理详情页
   async function handleDetailPage() {
@@ -767,11 +550,7 @@
     }
 
     const pageType = getPageType();
-    if (!pageType) return;
-
-    if (pageType === "list") {
-      handleListPage();
-    } else if (pageType === "detail") {
+    if (pageType === "detail") {
       handleDetailPage();
     }
   }
