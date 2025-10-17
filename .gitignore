@@ -1,0 +1,23 @@
+# 文档目录
+docs/
+
+# 截图文件
+*.png
+*.jpg
+*.jpeg
+
+# macOS
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志
+*.log
+
+# 临时文件
+*.tmp

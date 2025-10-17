@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         豆瓣读书 - 掌阅书城搜索助手
 // @namespace    douban-ireader-helper
-// @version      1.6.0
-// @description  在豆瓣读书页面显示掌阅书城的搜索结果，支持列表页和详情页
+// @version      1.7.0
+// @description  在豆瓣读书页面显示掌阅书城的搜索结果，支持列表页和详情页，支持书名+作者双重匹配
 // @author       Wang Dongguan
 // @match        https://book.douban.com/mine*
 // @match        https://book.douban.com/people/*/wish*
@@ -18,7 +18,7 @@
 
   // ========== 配置常量 ==========
   const CACHE_KEY_PREFIX = "ireader_cache_";
-  const CACHE_VERSION = "v6"; // 缓存版本（增加作者匹配逻辑）
+  const CACHE_VERSION = "v7"; // 缓存版本（修复作者分隔符匹配bug）
   const CACHE_VERSION_KEY = "ireader_cache_version";
   const CACHE_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7天过期
   const API_TIMEOUT = 10000; // 10秒超时
@@ -33,6 +33,30 @@
   // 调试日志（仅在DEBUG模式下输出）
   function debugLog(...args) {
     if (DEBUG) console.log("[掌阅助手]", ...args);
+  }
+
+  // 作者匹配判断（支持模糊匹配）
+  function authorsMatch(zyAuthor, dbAuthor) {
+    if (!zyAuthor || !dbAuthor) return false;
+
+    // 清理作者名：去除空格、括号、标点、分隔符等
+    const clean1 = zyAuthor
+      .replace(/\s+/g, "")
+      .replace(/[（(].*?[）)]/g, "")
+      .replace(/[[\]【】]/g, "")
+      .replace(/[.·•・\-]/g, "") // 统一去除各种分隔符：ASCII点、中点、项目符号、日文中点、连字符
+      .toLowerCase();
+    const clean2 = dbAuthor
+      .replace(/\s+/g, "")
+      .replace(/[（(].*?[）)]/g, "")
+      .replace(/[[\]【】]/g, "")
+      .replace(/[.·•・\-]/g, "") // 统一去除各种分隔符
+      .toLowerCase();
+
+    // 精确匹配或包含关系
+    return (
+      clean1 === clean2 || clean1.includes(clean2) || clean2.includes(clean1)
+    );
   }
 
   // 注入CSS样式（替代JS事件监听器）
@@ -93,6 +117,13 @@
       link.innerHTML = '<span class="checkmark" style="color: #0b7c2a;">✓</span> 掌阅书城有书';
       link.style.color = "#37a";
       link.style.cursor = "pointer";
+    } else if (result && result.uncertain) {
+      link.className = "ireader-link success";
+      link.href = result.searchUrl;
+      link.target = "_blank";
+      link.innerHTML = '<span style="color: #f60;">?</span> 查看搜索结果';
+      link.style.color = "#37a";
+      link.style.cursor = "pointer";
     } else {
       link.innerHTML = '<span style="color: #999;">✗</span> 掌阅书城没有';
       link.style.color = "#999";
@@ -135,6 +166,14 @@
           去看看
         </a>
       `;
+    } else if (result && result.uncertain) {
+      content.innerHTML = `
+        <span style="color: #f60;">? 不确定</span>
+        <a href="${result.searchUrl}" target="_blank" class="ireader-detail-link"
+           style="float: right; color: #37a; text-decoration: none;">
+          查看搜索结果
+        </a>
+      `;
     } else {
       content.innerHTML = `<span style="color: #999;">✗ 暂无此书</span>`;
     }
@@ -162,8 +201,18 @@
         const fullTitle = titleElement.textContent.trim();
         const mainTitle = fullTitle.split(/[：:]/)[0].trim(); // 支持中英文冒号
 
+        // 提取作者信息（从.pub中提取，格式：作者 / 出版社 / 年份 / 价格）
+        let author = "";
+        const pubElement = item.querySelector(".info .pub");
+        if (pubElement) {
+          const pubText = pubElement.textContent.trim();
+          // 提取第一个 / 前的内容作为作者
+          author = pubText.split("/")[0].trim();
+        }
+
         books.push({
           title: mainTitle,
+          author: author, // 新增作者字段
           element: item, // 保存元素引用，用于后续插入UI
         });
       }
@@ -175,7 +224,34 @@
   // 详情页 - 提取当前书籍
   function getBookFromDetail() {
     const titleElement = document.querySelector('[property="v:itemreviewed"]');
-    return titleElement ? titleElement.textContent.trim() : null;
+    if (!titleElement) return null;
+
+    const title = titleElement.textContent.trim();
+
+    // 提取作者信息（从#info中查找"作者:"后的内容）
+    let author = "";
+    const infoElement = document.querySelector("#info");
+    if (infoElement) {
+      // 查找包含"作者"或"作者:"的span元素
+      const spans = infoElement.querySelectorAll("span.pl");
+      for (let span of spans) {
+        if (span.textContent.includes("作者")) {
+          // 获取下一个兄弟节点或链接中的文本
+          let authorNode = span.nextSibling;
+          if (authorNode) {
+            author = authorNode.textContent.trim();
+            // 如果是链接，直接获取链接文本
+            const authorLink = span.parentElement.querySelector("a");
+            if (authorLink) {
+              author = authorLink.textContent.trim();
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    return { title, author };
   }
 
   // ========== 3. 掌阅API搜索模块 ==========
@@ -204,8 +280,8 @@
     });
   }
 
-  // 结果解析与书名匹配
-  function parseSearchResult(responseText, originalTitle) {
+  // 结果解析与书名匹配（支持作者匹配）
+  function parseSearchResult(responseText, originalTitle, originalAuthor) {
     let htmlContent = responseText;
 
     // 掌阅API返回格式：{"html": "转义的HTML字符串"}
@@ -241,7 +317,10 @@
       .split(/[：:]/)[0] // 只取冒号前的主标题
       .trim();
 
-    // 策略：只做精确匹配（去除冗余信息后）
+    // 收集所有书名匹配的结果
+    const nameMatches = [];
+
+    // 遍历所有搜索结果
     for (let link of bookLinks) {
       const nameElement = link.querySelector(".name");
       if (!nameElement) continue;
@@ -255,18 +334,64 @@
         .split(/[：:]/)[0] // 只取冒号前的主标题（去除副标题）
         .trim();
 
-      // 精确匹配（去除冗余信息后）
+      // 书名匹配
       if (cleanedBookName === cleanedOriginalTitle) {
-        return {
-          found: true,
+        const authorElement = link.querySelector(".author");
+        const bookAuthor = authorElement
+          ? authorElement.textContent.trim()
+          : "";
+
+        nameMatches.push({
           url: link.href,
           title: bookName,
+          author: bookAuthor,
+        });
+      }
+    }
+
+    // 没有任何书名匹配
+    if (nameMatches.length === 0) {
+      return { found: false };
+    }
+
+    // 只有1个书名匹配，且作者也匹配 → 精确匹配
+    if (nameMatches.length === 1) {
+      const match = nameMatches[0];
+      if (
+        !originalAuthor ||
+        !match.author ||
+        authorsMatch(match.author, originalAuthor)
+      ) {
+        return {
+          found: true,
+          url: match.url,
+          title: match.title,
         };
       }
     }
 
-    // 如果没有匹配，返回未找到（避免误匹配）
-    return { found: false };
+    // 有多个书名匹配，尝试通过作者筛选
+    if (originalAuthor) {
+      const authorMatches = nameMatches.filter((match) =>
+        authorsMatch(match.author, originalAuthor)
+      );
+
+      // 唯一的作者匹配 → 精确匹配
+      if (authorMatches.length === 1) {
+        return {
+          found: true,
+          url: authorMatches[0].url,
+          title: authorMatches[0].title,
+        };
+      }
+    }
+
+    // 其他情况：多个结果或作者不匹配 → 返回不确定状态
+    return {
+      found: false,
+      uncertain: true,
+      searchUrl: `https://m.zhangyue.com/search?keyWord=${encodeURIComponent(originalTitle)}`,
+    };
   }
 
   // ========== 4. UI插入模块 ==========
@@ -315,6 +440,11 @@
       link.target = "_blank";
       link.innerHTML = '<span class="checkmark" style="color: #0b7c2a;">✓</span> 掌阅书城有书';
       // 移除JS事件监听器，改用CSS hover（性能优化）
+    } else if (result && result.uncertain) {
+      link.className = "ireader-link success";
+      link.href = result.searchUrl;
+      link.target = "_blank";
+      link.innerHTML = '<span style="color: #f60;">?</span> 查看搜索结果';
     } else {
       link.innerHTML = '<span style="color: #999;">✗</span> 掌阅书城没有';
       link.style.color = "#999";
@@ -372,6 +502,14 @@
         <a href="${result.url}" target="_blank" class="ireader-detail-link"
            style="float: right; color: #37a; text-decoration: none;">
           去看看
+        </a>
+      `;
+    } else if (result && result.uncertain) {
+      content.innerHTML = `
+        <span style="color: #f60;">? 不确定</span>
+        <a href="${result.searchUrl}" target="_blank" class="ireader-detail-link"
+           style="float: right; color: #37a; text-decoration: none;">
+          查看搜索结果
         </a>
       `;
     } else {
@@ -512,7 +650,7 @@
 
         try {
           const html = await searchIReader(book.title);
-          result = parseSearchResult(html, book.title);
+          result = parseSearchResult(html, book.title, book.author);
           setCachedResult(book.title, result);
         } catch (error) {
           console.error(`搜索 "${book.title}" 失败:`, error);
@@ -526,7 +664,7 @@
 
             try {
               const html = await searchIReader(title);
-              const result = parseSearchResult(html, title);
+              const result = parseSearchResult(html, title, book.author);
               setCachedResult(title, result);
               updateListItemUI(book.element, result, "success");
             } catch (error) {
@@ -549,11 +687,13 @@
 
   // 处理详情页
   async function handleDetailPage() {
-    const bookTitle = getBookFromDetail();
-    if (!bookTitle) {
+    const bookInfo = getBookFromDetail();
+    if (!bookInfo) {
       debugLog("未找到书名");
       return;
     }
+
+    const { title: bookTitle, author: bookAuthor } = bookInfo;
 
     debugLog(`开始查询："${bookTitle}"`);
 
@@ -566,7 +706,7 @@
     if (!result) {
       try {
         const html = await searchIReader(bookTitle);
-        result = parseSearchResult(html, bookTitle);
+        result = parseSearchResult(html, bookTitle, bookAuthor);
         setCachedResult(bookTitle, result);
       } catch (error) {
         console.error("搜索失败:", error);
@@ -582,7 +722,7 @@
 
             try {
               const html = await searchIReader(title);
-              const result = parseSearchResult(html, title);
+              const result = parseSearchResult(html, title, bookAuthor);
               setCachedResult(title, result);
               updateDetailPageUI(result, "success");
             } catch (error) {
