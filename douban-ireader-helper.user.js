@@ -253,8 +253,10 @@
           ? authorElement.textContent.trim()
           : "";
 
+        // 修复：使用 getAttribute 获取原始 href，避免 DOMParser 基于豆瓣页面解析相对路径
+        const rawHref = link.getAttribute('href');
         nameMatches.push({
-          url: link.href,
+          url: new URL(rawHref, 'https://m.zhangyue.com').href,
           title: bookName,
           author: bookAuthor,
         });
