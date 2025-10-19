@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         豆瓣读书 - 掌阅书城搜索助手
 // @namespace    douban-ireader-helper
-// @version      1.8.0
+// @version      1.8.1
 // @description  在豆瓣读书详情页显示掌阅书城的搜索结果，支持书名+作者双重匹配
 // @author       Wang Dongguan
 // @match        https://book.douban.com/subject/*
